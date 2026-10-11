@@ -3,6 +3,8 @@
 A Spotlight-style launcher for GNOME on Wayland. Press **Super+Space**, type, and open apps,
 files, GitHub repositories or web searches from a single floating box.
 
+![hopla showing the Apps tab](docs/screenshot.png)
+
 ## Features
 
 The launcher has four tabs. The text you typed is kept when you switch between them.
