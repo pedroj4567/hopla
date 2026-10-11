@@ -347,7 +347,7 @@ class Buscador(Gtk.Application):
             elif len(word) < 2 or not name.lower().startswith(word):
                 continue
             if terms:
-                surl = tpl % urllib.parse.quote(terms)
+                surl = tpl % urllib.parse.quote(terms, safe="")
                 res.append(Result(f"Buscar «{terms}» en {name}", surl, icon,
                                   lambda surl=surl: self.open_url(surl)))
             else:
