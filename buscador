@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+"""Buscador tipo Spotlight para GNOME (Wayland).
+
+Tab / Shift+Tab cambian de modo (Apps → Archivos → Web) conservando el texto.
+↑/↓ mueven la selección, Enter abre, Ctrl+Enter abre la carpeta del archivo,
+Ctrl+1/2/3 saltan a un modo, Esc (o clic fuera) cierra.
+Volver a lanzarlo mientras está abierto lo cierra (sirve como toggle del atajo).
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import urllib.parse
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+
+HOME = os.path.expanduser("~")
+MODES = ["Apps", "Archivos", "GitHub", "Web"]
+MAX_RESULTS = 20
+FD = shutil.which("fdfind") or shutil.which("fd")
+GH = shutil.which("gh")
+ICON_DIR = os.path.join(GLib.get_user_data_dir(), "buscador", "icons")
+# Icono de cada pestaña: nombre del tema o "brand:<logo>" (svg en ICON_DIR)
+TAB_ICONS = ["view-app-grid-symbolic", "folder-symbolic", "brand:github", "web-browser-symbolic"]
+REPO_CACHE = os.path.join(GLib.get_user_cache_dir(), "buscador", "repos.json")
+ENGINES = [
+    ("Google", "https://www.google.com/search?q=%s", "brand:google"),
+    ("YouTube", "https://www.youtube.com/results?search_query=%s", "brand:youtube"),
+    ("GitHub", "https://github.com/search?q=%s", "brand:github"),
+]
+# Sitios conocidos: "gmail", "gmail.com" o "abre gmail" → abrir el sitio;
+# "amazon audífonos" → buscar en ese sitio. Se ven al abrir la pestaña Web.
+SITES = [
+    ("Gmail", "https://mail.google.com", "https://mail.google.com/mail/u/0/#search/%s", "brand:gmail"),
+    ("Google", "https://www.google.com", "https://www.google.com/search?q=%s", "brand:google"),
+    ("YouTube", "https://www.youtube.com", "https://www.youtube.com/results?search_query=%s", "brand:youtube"),
+    ("GitHub", "https://github.com", "https://github.com/search?q=%s", "brand:github"),
+    ("Amazon", "https://www.amazon.com", "https://www.amazon.com/s?k=%s", "brand:amazon"),
+    ("Spotify", "https://open.spotify.com", "https://open.spotify.com/search/%s", "brand:spotify"),
+]
+OPEN_WORDS = ("abre ", "abrir ", "open ", "ir a ")
+FOLDERS = ["Documents", "Downloads", "Pictures", "Work", "Projects"]
+GH_LINKS = [
+    ("Mis pull requests", "https://github.com/pulls", "mail-send-receive"),
+    ("Mis issues", "https://github.com/issues", "dialog-information"),
+    ("Notificaciones", "https://github.com/notifications", "preferences-system-notifications"),
+]
+
+CSS = """
+window.buscador { background: transparent; }
+.card {
+  background: rgba(30, 30, 46, 0.85); border-radius: 16px; padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.card entry {
+  font-size: 20px; min-height: 44px; color: #eeeeee;
+  background: transparent; border: none; box-shadow: none; outline: none;
+}
+.tabs { margin: 6px 4px 8px 4px; }
+.tabs .tab { padding: 4px 14px; border-radius: 8px; color: #9a9aa8; }
+.tabs .tab.active { background: #89b4fa; color: #1e1e2e; font-weight: bold; }
+list { background: transparent; }
+list row { border-radius: 10px; padding: 6px 8px; }
+list row:selected { background: rgba(137, 180, 250, 0.22); }
+.title { color: #eeeeee; font-size: 15px; }
+.sub { color: #9a9aa8; font-size: 12px; }
+.hint { color: #6c6c7a; font-size: 11px; margin: 8px 4px 0 4px; }
+"""
+
+
+def score(query, *fields):
+    """Menor es mejor; None si no coincide."""
+    best = None
+    for rank, text in enumerate(fields):
+        if not text:
+            continue
+        t = text.lower()
+        if t.startswith(query):
+            s = 0
+        elif any(w.startswith(query) for w in t.replace("-", " ").split()):
+            s = 1
+        elif query in t:
+            s = 2
+        elif rank == 0 and _subsequence(query, t):  # "vsc" → Visual Studio Code
+            s = 3
+        else:
+            continue
+        s += rank * 4  # coincidencias en el nombre pesan más que en keywords/exec
+        best = s if best is None else min(best, s)
+    return best
+
+
+def _subsequence(q, t):
+    it = iter(t)
+    return all(c in it for c in q)
+
+
+def make_icon(name):
+    """'brand:github' → logo svg instalado; si falta, un icono genérico del tema."""
+    if name.startswith("brand:"):
+        path = os.path.join(ICON_DIR, name[6:] + ".svg")
+        if os.path.exists(path):
+            return Gio.FileIcon.new(Gio.File.new_for_path(path))
+        return Gio.ThemedIcon.new("web-browser")
+    return Gio.ThemedIcon.new(name)
+
+
+class Result:
+    def __init__(self, title, subtitle, icon, action, alt_action=None):
+        self.title, self.subtitle, self.icon = title, subtitle, icon
+        self.action, self.alt_action = action, alt_action
+
+
+class Buscador(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id="dev.acostadev.buscador")
+        self.win = None
+        self.mode = 0
+        self.results = []
+        self.apps = []
+        self.cancel = None
+        self.debounce = 0
+        self.was_active = False
+        self.closing = False
+        self.pending = 0
+        self.repos = []
+
+    # ------------------------------------------------------------ ventana
+    def do_activate(self):
+        if self.win:  # segunda invocación del atajo → cerrar
+            self.quit()
+            return
+        self.apps = [a for a in Gio.AppInfo.get_all() if a.should_show()]
+        self.repos = self.load_repos()
+        self.refresh_repos()
+
+        css = Gtk.CssProvider()
+        css.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.win = Gtk.ApplicationWindow(application=self, decorated=False, title="Buscador")
+        self.win.add_css_class("buscador")
+
+        self.card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, width_request=680,
+                            height_request=520)
+        self.card.add_css_class("card")
+
+        self.entry = Gtk.Entry(placeholder_text="Buscar…", hexpand=True)
+        self.entry.connect("changed", lambda *_: self.search())
+        self.card.append(self.entry)
+
+        tabs = Gtk.Box(spacing=6)
+        tabs.add_css_class("tabs")
+        self.tab_labels = []
+        for i, name in enumerate(MODES):
+            lbl = Gtk.Box(spacing=6)
+            lbl.add_css_class("tab")
+            lbl.append(Gtk.Image(gicon=make_icon(TAB_ICONS[i]), pixel_size=16))
+            lbl.append(Gtk.Label(label=name))
+            click = Gtk.GestureClick()
+            click.connect("released", lambda *_, i=i: self.set_mode(i))
+            lbl.add_controller(click)
+            tabs.append(lbl)
+            self.tab_labels.append(lbl)
+        self.card.append(tabs)
+
+        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.BROWSE)
+        self.listbox.connect("row-activated", lambda _, row: self.open_result(row.get_index(), False))
+        # Altura fija: la ventana no cambia de tamaño al escribir
+        self.scroll = Gtk.ScrolledWindow(vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.scroll.set_child(self.listbox)
+        self.card.append(self.scroll)
+
+        hint = Gtk.Label(xalign=0, label="Tab cambiar modo · Enter abrir · Ctrl+Enter carpeta / VS Code · Esc cerrar")
+        hint.add_css_class("hint")
+        self.card.append(hint)
+
+        self.win.set_child(self.card)
+
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        self.win.add_controller(keys)
+
+        outside = Gtk.GestureClick()
+        outside.connect("pressed", self.on_click)
+        self.win.add_controller(outside)
+
+        self.win.connect("notify::is-active", self.on_active)
+        self.set_mode(0)
+        self.win.present()
+        self.entry.grab_focus()
+
+    def on_active(self, win, _):
+        # Cierra al perder el foco (p. ej. Alt+Tab), pero no antes de haberlo tenido
+        if win.is_active():
+            self.was_active = True
+        elif self.was_active and not self.closing:
+            self.quit()
+
+    def on_click(self, _gesture, _n, x, y):
+        w = self.win.pick(x, y, Gtk.PickFlags.DEFAULT)
+        if w is None or not (w == self.card or w.is_ancestor(self.card)):
+            self.quit()
+
+    def on_key(self, _ctrl, keyval, _code, state):
+        name = Gdk.keyval_name(keyval)
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if name == "Escape":
+            self.quit()
+        elif name == "Tab":
+            self.set_mode((self.mode + 1) % len(MODES))
+        elif name == "ISO_Left_Tab":
+            self.set_mode((self.mode - 1) % len(MODES))
+        elif ctrl and name in ("1", "2", "3", "4"):
+            self.set_mode(int(name) - 1)
+        elif name in ("Down", "Up"):
+            self.move(1 if name == "Down" else -1)
+        elif name in ("Return", "KP_Enter"):
+            row = self.listbox.get_selected_row()
+            if row:
+                self.open_result(row.get_index(), ctrl)
+        else:
+            return False
+        return True
+
+    def set_mode(self, i):
+        self.mode = i
+        for j, lbl in enumerate(self.tab_labels):
+            (lbl.add_css_class if j == i else lbl.remove_css_class)("active")
+        self.search()
+
+    def move(self, delta):
+        row = self.listbox.get_selected_row()
+        idx = (row.get_index() if row else -1) + delta
+        target = self.listbox.get_row_at_index(max(0, min(idx, len(self.results) - 1)))
+        if target:
+            self.listbox.select_row(target)
+            self.scroll_to(target)
+
+    def scroll_to(self, row):
+        # El foco se queda en la caja de texto, así que GTK no desplaza solo la lista
+        ok, bounds = row.compute_bounds(self.listbox)
+        if not ok:
+            return
+        adj = self.scroll.get_vadjustment()
+        top, bottom = bounds.get_y(), bounds.get_y() + bounds.get_height()
+        if top < adj.get_value():
+            adj.set_value(top)
+        elif bottom > adj.get_value() + adj.get_page_size():
+            adj.set_value(bottom - adj.get_page_size())
+
+    # ------------------------------------------------------------ búsqueda
+    def search(self):
+        q = self.entry.get_text().strip()
+        if self.cancel:
+            self.cancel.cancel()
+            self.cancel = None
+        if self.debounce:
+            GLib.source_remove(self.debounce)
+            self.debounce = 0
+        if self.mode == 0:
+            self.show(self.search_apps(q) if q else self.all_apps())
+        elif self.mode == 1:
+            if len(q) < 2:
+                self.show(self.home_files())
+            else:  # fd es rápido pero no instantáneo: espera a que dejes de escribir
+                self.debounce = GLib.timeout_add(120, self.search_files, q)
+        elif self.mode == 2:
+            self.show(self.search_github(q))
+            if len(q) >= 3:  # repos públicos: espera a que dejes de escribir
+                self.debounce = GLib.timeout_add(350, self.search_github_public, q)
+        else:
+            self.show(self.search_web(q) if q else self.links())
+
+    def search_apps(self, q):
+        ql = q.lower()
+        scored = []
+        for a in self.apps:
+            extra = " ".join(a.get_keywords() or []) if isinstance(a, Gio.DesktopAppInfo) else ""
+            s = score(ql, a.get_display_name(), extra, a.get_executable())
+            if s is not None:
+                scored.append((s, a.get_display_name().lower(), a))
+        scored.sort(key=lambda t: t[:2])
+        res = [Result(a.get_display_name(), a.get_description() or "", a.get_icon(),
+                      lambda a=a: self.launch_app(a))
+               for _, _, a in scored[:MAX_RESULTS]]
+        sites = self.search_sites(q)
+        # Un sitio va primero salvo que haya una app cuyo nombre empiece por lo escrito
+        if sites and not (scored and scored[0][0] == 0):
+            return sites + res
+        # Si nada coincide, ofrece la web directamente
+        return res + sites or self.search_web(q)[:1]
+
+    # ------------------------------------------------------------ contenido inicial (sin texto)
+    def all_apps(self):
+        apps = sorted(self.apps, key=lambda a: a.get_display_name().lower())
+        return [Result(a.get_display_name(), a.get_description() or "", a.get_icon(),
+                       lambda a=a: self.launch_app(a)) for a in apps]
+
+    def home_files(self):
+        res = [self.file_result(os.path.join(HOME, d)) for d in FOLDERS
+               if os.path.isdir(os.path.join(HOME, d))]
+        recent = sorted(Gtk.RecentManager.get_default().get_items(),
+                        key=lambda i: i.get_modified().to_unix(), reverse=True)
+        for item in recent:
+            path = GLib.filename_from_uri(item.get_uri())[0] if item.get_uri().startswith("file://") else None
+            if path and os.path.exists(path):
+                r = self.file_result(path)
+                r.subtitle = "Reciente · " + r.subtitle
+                res.append(r)
+            if len(res) >= 20:
+                break
+        return res
+
+    def links(self):
+        return [self.site_open(site) for site in SITES]
+
+    def site_open(self, site):
+        name, url, _tpl, icon = site
+        return Result(f"Abrir {name}", url, icon, lambda: self.open_url(url))
+
+    def search_sites(self, q):
+        """Sitios cuyo nombre empieza por la primera palabra (≥2 letras)."""
+        ql = q.lower().strip()
+        for w in OPEN_WORDS:
+            if ql.startswith(w):
+                ql = ql[len(w):].strip()
+        word, _, terms = ql.partition(" ")
+        word = word.removeprefix("https://").removeprefix("http://").removeprefix("www.")
+        word = word.split("/")[0].split(".")[0]  # "gmail.com" → "gmail"
+        if len(word) < 2:
+            return []
+        res = []
+        for site in SITES:
+            name, url, tpl, icon = site
+            if not name.lower().startswith(word):
+                continue
+            if terms:
+                surl = tpl % urllib.parse.quote(terms)
+                res.append(Result(f"Buscar «{terms}» en {name}", surl, icon,
+                                  lambda surl=surl: self.open_url(surl)))
+            else:
+                res.append(self.site_open(site))
+        return res
+
+    def search_files(self, q):
+        self.debounce = 0
+        if not FD:
+            self.show([Result("Falta fd", "sudo apt install fd-find", "dialog-error", lambda: None)])
+            return False
+        words = q.lower().split()
+        first = max(words, key=len)
+        self.cancel = Gio.Cancellable()
+        proc = Gio.Subprocess.new(
+            [FD, "--ignore-case", "--fixed-strings", "--absolute-path", "--max-results", "300",
+             "--exclude", "node_modules", "--exclude", ".git", first, HOME],
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+        proc.communicate_utf8_async(None, self.cancel, self.on_fd, words)
+        return False
+
+    def on_fd(self, proc, task, words):
+        try:
+            _, out, _ = proc.communicate_utf8_finish(task)
+        except GLib.Error:  # cancelado porque seguiste escribiendo
+            return
+        paths = [p.rstrip("/") for p in out.splitlines()
+                 if all(w in p.lower() for w in words)]
+
+        def rank(p):
+            base = os.path.basename(p).lower()
+            return (0 if base.startswith(words[0]) else 1 if words[0] in base else 2,
+                    p.count("/"), len(p))
+        paths.sort(key=rank)
+        self.show([self.file_result(p) for p in paths[:MAX_RESULTS]])
+
+    def file_result(self, path):
+        f = Gio.File.new_for_path(path)
+        is_dir = os.path.isdir(path)
+        if is_dir:
+            icon = "folder"
+        else:
+            ctype, _ = Gio.content_type_guess(path, None)
+            icon = Gio.content_type_get_icon(ctype)
+        shown = path.replace(HOME, "~", 1)
+        return Result(os.path.basename(path), os.path.dirname(shown), icon,
+                      lambda: Gio.AppInfo.launch_default_for_uri(f.get_uri(), self.launch_ctx()),
+                      lambda: self.reveal(path))
+
+    def reveal(self, path):
+        if shutil.which("nautilus"):
+            subprocess.Popen(["nautilus", "--select", path], start_new_session=True)
+        else:
+            Gio.AppInfo.launch_default_for_uri(
+                Gio.File.new_for_path(os.path.dirname(path)).get_uri(), self.launch_ctx())
+
+    # ------------------------------------------------------------ GitHub
+    def load_repos(self):
+        try:
+            with open(REPO_CACHE) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return []
+
+    def refresh_repos(self):
+        """Actualiza en segundo plano la lista de repos (tuyos y de tus organizaciones)."""
+        if not GH:
+            return
+        proc = Gio.Subprocess.new(
+            [GH, "api", "user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member",
+             "--jq", "[.[] | {name: .full_name, desc: .description, url: .html_url}]"],
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+        proc.communicate_utf8_async(None, None, self.on_repos)
+
+    def on_repos(self, proc, task):
+        try:
+            _, out, _ = proc.communicate_utf8_finish(task)
+            repos = json.loads(out)
+        except (GLib.Error, ValueError):
+            return
+        if repos == self.repos:
+            return
+        self.repos = repos
+        os.makedirs(os.path.dirname(REPO_CACHE), exist_ok=True)
+        with open(REPO_CACHE, "w") as f:
+            json.dump(repos, f)
+        if self.mode == 2 and not self.entry.get_text().strip():
+            self.show(self.search_github(""))
+
+    def repo_result(self, name, desc, url, public=False):
+        short = name.split("/")[-1]
+        local = next((p for p in (os.path.join(HOME, d, short) for d in ("Work", "Projects"))
+                      if os.path.isdir(p)), None)
+        sub = desc or url
+        if local:
+            sub = "Clonado en " + local.replace(HOME, "~", 1) + " · " + sub
+        elif public:
+            sub = "Público · " + sub
+        alt = (lambda: subprocess.Popen(["code", local], start_new_session=True)) if local else None
+        return Result(name, sub, "brand:github", lambda: self.open_url(url), alt)
+
+    def search_github(self, q):
+        ql = q.lower()
+        if not ql:
+            res = [Result(t, u, i, lambda u=u: self.open_url(u)) for t, u, i in GH_LINKS]
+            return res + [self.repo_result(r["name"], r["desc"], r["url"]) for r in self.repos]
+        scored = []
+        for r in self.repos:
+            s = score(ql, r["name"].split("/")[-1], r["name"], r["desc"] or "")
+            if s is not None:
+                scored.append((s, r))
+        scored.sort(key=lambda t: t[0])
+        res = [self.repo_result(r["name"], r["desc"], r["url"]) for _, r in scored]
+        url = "https://github.com/search?type=repositories&q=" + urllib.parse.quote_plus(q)
+        res.append(Result(f"Buscar «{q}» en GitHub", url, "brand:github", lambda: self.open_url(url)))
+        return res
+
+    def search_github_public(self, q):
+        self.debounce = 0
+        if not GH:
+            return False
+        self.cancel = Gio.Cancellable()
+        proc = Gio.Subprocess.new(
+            [GH, "search", "repos", q, "--limit", "10", "--json", "fullName,description,url"],
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
+        proc.communicate_utf8_async(None, self.cancel, self.on_github_public, q)
+        return False
+
+    def on_github_public(self, proc, task, q):
+        try:
+            _, out, _ = proc.communicate_utf8_finish(task)
+            found = json.loads(out)
+        except (GLib.Error, ValueError):  # cancelado o sin red
+            return
+        mine = {r["name"] for r in self.repos}
+        extra = [self.repo_result(r["fullName"], r["description"], r["url"], public=True)
+                 for r in found if r["fullName"] not in mine]
+        self.append(extra)
+
+    def search_web(self, q):
+        res = self.search_sites(q)
+        if not res and " " not in q and "." in q.strip("."):  # parece una URL
+            url = q if "://" in q else "https://" + q
+            res.append(Result(f"Abrir {q}", url, "web-browser", lambda: self.open_url(url)))
+        enc = urllib.parse.quote_plus(q)
+        for name, tpl, icon in ENGINES:
+            url = tpl % enc
+            res.append(Result(f"Buscar «{q}» en {name}", url, icon,
+                              lambda url=url: self.open_url(url)))
+        return res
+
+    def open_url(self, url):
+        self.pending += 1
+        Gio.AppInfo.launch_default_for_uri_async(
+            url, self.launch_ctx(), None,
+            lambda _s, res: self.launched(Gio.AppInfo.launch_default_for_uri_finish, res))
+
+    def launch_app(self, app):
+        # Async: muchas apps (Ptyxis, Nautilus…) son DBusActivatable y el lanzamiento
+        # es una llamada D-Bus; si salimos antes de que se entregue, la app no abre.
+        self.pending += 1
+        app.launch_uris_async([], self.launch_ctx(), None,
+                              lambda _s, res: self.launched(app.launch_uris_finish, res))
+
+    def launched(self, finish, res):
+        try:
+            finish(res)
+        except GLib.Error as e:
+            print(f"buscador: {e.message}", file=sys.stderr)
+        self.pending -= 1
+        if self.closing and self.pending <= 0:
+            self.finish_quit()
+
+    def launch_ctx(self):
+        return self.win.get_display().get_app_launch_context()
+
+    # ------------------------------------------------------------ resultados
+    def show(self, results):
+        self.results = []
+        self.listbox.remove_all()
+        self.append(results)
+
+    def append(self, results):
+        selected = self.listbox.get_selected_row()
+        self.results += results
+        for r in results:
+            row = Gtk.Box(spacing=12)
+            img = Gtk.Image(pixel_size=32)
+            if r.icon:
+                img.set_from_gicon(make_icon(r.icon) if isinstance(r.icon, str) else r.icon)
+            row.append(img)
+            texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER)
+            title = Gtk.Label(label=r.title, xalign=0, ellipsize=Pango.EllipsizeMode.END)
+            title.add_css_class("title")
+            texts.append(title)
+            if r.subtitle:
+                sub = Gtk.Label(label=r.subtitle, xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
+                sub.add_css_class("sub")
+                texts.append(sub)
+            row.append(texts)
+            self.listbox.append(row)
+        first = self.listbox.get_row_at_index(0)
+        if first and not selected:
+            self.listbox.select_row(first)
+            self.scroll.get_vadjustment().set_value(0)
+
+    def open_result(self, index, alt):
+        r = self.results[index]
+        try:
+            (r.alt_action if alt and r.alt_action else r.action)()
+        except GLib.Error as e:
+            print(f"buscador: {e.message}", file=sys.stderr)
+            return
+        # No salir de inmediato: ocultar y esperar a que el lanzamiento termine
+        self.closing = True
+        self.hold()
+        self.win.set_visible(False)
+        if self.pending <= 0:
+            self.finish_quit()
+        else:
+            GLib.timeout_add_seconds(10, self.finish_quit)  # red de seguridad
+
+    def finish_quit(self, *_):
+        # Vacía la cola de D-Bus antes de salir para no perder mensajes pendientes
+        try:
+            Gio.bus_get_sync(Gio.BusType.SESSION, None).flush_sync(None)
+        except GLib.Error:
+            pass
+        GLib.timeout_add(300, self.quit)
+        return False
+
+
+if __name__ == "__main__":
+    sys.exit(Buscador().run(sys.argv))
