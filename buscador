@@ -21,7 +21,53 @@ gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 HOME = os.path.expanduser("~")
-MODES = ["Apps", "Archivos", "GitHub", "Web"]
+
+# Textos de la interfaz por idioma; se elige según el idioma del sistema (inglés si no está).
+STRINGS = {
+    "es": {
+        "files": "Archivos", "search": "Buscar…",
+        "hint": "Tab cambiar modo · Enter abrir · Ctrl+Enter carpeta / VS Code · Esc cerrar",
+        "open": "Abrir {name}", "search_in": "Buscar «{q}» en {name}",
+        "recent": "Reciente · ", "cloned": "Clonado en {path} · ", "public": "Público · ",
+        "missing_fd": "Falta fd", "open_failed": "No se pudo abrir {name}",
+        "my_prs": "Mis pull requests", "my_issues": "Mis issues", "notifications": "Notificaciones",
+    },
+    "en": {
+        "files": "Files", "search": "Search…",
+        "hint": "Tab switch mode · Enter open · Ctrl+Enter folder / VS Code · Esc close",
+        "open": "Open {name}", "search_in": "Search “{q}” on {name}",
+        "recent": "Recent · ", "cloned": "Cloned in {path} · ", "public": "Public · ",
+        "missing_fd": "fd is missing", "open_failed": "Couldn't open {name}",
+        "my_prs": "My pull requests", "my_issues": "My issues", "notifications": "Notifications",
+    },
+    "pt": {
+        "files": "Arquivos", "search": "Pesquisar…",
+        "hint": "Tab mudar modo · Enter abrir · Ctrl+Enter pasta / VS Code · Esc fechar",
+        "open": "Abrir {name}", "search_in": "Pesquisar “{q}” em {name}",
+        "recent": "Recente · ", "cloned": "Clonado em {path} · ", "public": "Público · ",
+        "missing_fd": "fd não instalado", "open_failed": "Não foi possível abrir {name}",
+        "my_prs": "Meus pull requests", "my_issues": "Minhas issues", "notifications": "Notificações",
+    },
+}
+
+
+def system_lang():
+    # Respeta LANGUAGE, LC_ALL, LC_MESSAGES y LANG, en ese orden
+    for name in GLib.get_language_names():
+        code = name.split("_")[0].split(".")[0].split("@")[0]
+        if code in STRINGS:
+            return code
+    return "en"
+
+
+LANG = system_lang()
+
+
+def tr(key, **kw):
+    return STRINGS[LANG].get(key, STRINGS["en"][key]).format(**kw)
+
+
+MODES = ["Apps", tr("files"), "GitHub", "Web"]
 MAX_RESULTS = 20
 FD = shutil.which("fdfind") or shutil.which("fd")
 GH = shutil.which("gh")
@@ -44,12 +90,15 @@ SITES = [
     ("Amazon", "https://www.amazon.com", "https://www.amazon.com/s?k=%s", "brand:amazon"),
     ("Spotify", "https://open.spotify.com", "https://open.spotify.com/search/%s", "brand:spotify"),
 ]
-OPEN_WORDS = ("abre ", "abrir ", "open ", "ir a ")
-FOLDERS = ["Documents", "Downloads", "Pictures", "Work", "Projects"]
+OPEN_WORDS = ("abre ", "abrir ", "abra ", "open ", "go to ", "ir a ", "ir para ")
+# Carpetas del usuario con su nombre real en el idioma del sistema (Documentos, Documents…)
+FOLDERS = [GLib.get_user_special_dir(d) for d in (
+    GLib.UserDirectory.DIRECTORY_DOCUMENTS, GLib.UserDirectory.DIRECTORY_DOWNLOAD,
+    GLib.UserDirectory.DIRECTORY_PICTURES)] + [os.path.join(HOME, d) for d in ("Work", "Projects")]
 GH_LINKS = [
-    ("Mis pull requests", "https://github.com/pulls", "mail-send-receive"),
-    ("Mis issues", "https://github.com/issues", "dialog-information"),
-    ("Notificaciones", "https://github.com/notifications", "preferences-system-notifications"),
+    (tr("my_prs"), "https://github.com/pulls", "mail-send-receive"),
+    (tr("my_issues"), "https://github.com/issues", "dialog-information"),
+    (tr("notifications"), "https://github.com/notifications", "preferences-system-notifications"),
 ]
 
 CSS = """
@@ -161,7 +210,7 @@ class Buscador(Gtk.Application):
                             height_request=520)
         self.card.add_css_class("card")
 
-        self.entry = Gtk.Entry(placeholder_text="Buscar…", hexpand=True)
+        self.entry = Gtk.Entry(placeholder_text=tr("search"), hexpand=True)
         self.entry.connect("changed", lambda *_: self.search())
         self.card.append(self.entry)
 
@@ -187,7 +236,7 @@ class Buscador(Gtk.Application):
         self.scroll.set_child(self.listbox)
         self.card.append(self.scroll)
 
-        hint = Gtk.Label(xalign=0, label="Tab cambiar modo · Enter abrir · Ctrl+Enter carpeta / VS Code · Esc cerrar")
+        hint = Gtk.Label(xalign=0, label=tr("hint"))
         hint.add_css_class("hint")
         self.card.append(hint)
 
@@ -314,15 +363,14 @@ class Buscador(Gtk.Application):
                        lambda a=a: self.launch_app(a)) for a in apps]
 
     def home_files(self):
-        res = [self.file_result(os.path.join(HOME, d)) for d in FOLDERS
-               if os.path.isdir(os.path.join(HOME, d))]
+        res = [self.file_result(d) for d in FOLDERS if d and d != HOME and os.path.isdir(d)]
         recent = sorted(Gtk.RecentManager.get_default().get_items(),
                         key=lambda i: i.get_modified().to_unix(), reverse=True)
         for item in recent:
             path = GLib.filename_from_uri(item.get_uri())[0] if item.get_uri().startswith("file://") else None
             if path and os.path.exists(path):
                 r = self.file_result(path)
-                r.subtitle = "Reciente · " + r.subtitle
+                r.subtitle = tr("recent") + r.subtitle
                 res.append(r)
             if len(res) >= 20:
                 break
@@ -333,7 +381,7 @@ class Buscador(Gtk.Application):
 
     def site_open(self, site):
         name, url, _tpl, icon = site
-        return Result(f"Abrir {name}", url, icon, lambda: self.open_url(url))
+        return Result(tr("open", name=name), url, icon, lambda: self.open_url(url))
 
     def search_sites(self, q):
         """Sitios cuyo nombre empieza por la primera palabra (≥2 letras)."""
@@ -356,7 +404,7 @@ class Buscador(Gtk.Application):
                 continue
             if terms:
                 surl = tpl % urllib.parse.quote(terms, safe="")
-                res.append(Result(f"Buscar «{terms}» en {name}", surl, icon,
+                res.append(Result(tr("search_in", q=terms, name=name), surl, icon,
                                   lambda surl=surl: self.open_url(surl)))
             else:
                 res.append(self.site_open(site))
@@ -365,7 +413,7 @@ class Buscador(Gtk.Application):
     def search_files(self, q):
         self.debounce = 0
         if not FD:
-            self.show([Result("Falta fd", "sudo apt install fd-find", "dialog-error", lambda: None)])
+            self.show([Result(tr("missing_fd"), "sudo apt install fd-find", "dialog-error", lambda: None)])
             return False
         words = q.lower().split()
         first = max(words, key=len)
@@ -453,9 +501,9 @@ class Buscador(Gtk.Application):
                       if os.path.isdir(p)), None)
         sub = desc or url
         if local:
-            sub = "Clonado en " + local.replace(HOME, "~", 1) + " · " + sub
+            sub = tr("cloned", path=local.replace(HOME, "~", 1)) + sub
         elif public:
-            sub = "Público · " + sub
+            sub = tr("public") + sub
         alt = (lambda: subprocess.Popen(["code", local], start_new_session=True)) if local else None
         return Result(name, sub, "brand:github", lambda: self.open_url(url), alt)
 
@@ -472,7 +520,7 @@ class Buscador(Gtk.Application):
         scored.sort(key=lambda t: t[0])
         res = [self.repo_result(r["name"], r["desc"], r["url"]) for _, r in scored]
         url = "https://github.com/search?type=repositories&q=" + urllib.parse.quote_plus(q)
-        res.append(Result(f"Buscar «{q}» en GitHub", url, "brand:github", lambda: self.open_url(url)))
+        res.append(Result(tr("search_in", q=q, name="GitHub"), url, "brand:github", lambda: self.open_url(url)))
         return res
 
     def search_github_public(self, q):
@@ -501,11 +549,11 @@ class Buscador(Gtk.Application):
         res = self.search_sites(q)
         if not res and " " not in q and "." in q.strip("."):  # parece una URL
             url = q if "://" in q else "https://" + q
-            res.append(Result(f"Abrir {q}", url, "web-browser", lambda: self.open_url(url)))
+            res.append(Result(tr("open", name=q), url, "web-browser", lambda: self.open_url(url)))
         enc = urllib.parse.quote_plus(q)
         for name, tpl, icon in ENGINES:
             url = tpl % enc
-            res.append(Result(f"Buscar «{q}» en {name}", url, icon,
+            res.append(Result(tr("search_in", q=q, name=name), url, icon,
                               lambda url=url: self.open_url(url)))
         return res
 
@@ -573,7 +621,7 @@ class Buscador(Gtk.Application):
         except (GLib.Error, OSError) as e:  # OSError: p. ej. falta "code" o "nautilus"
             msg = e.message if isinstance(e, GLib.Error) else str(e)
             print(f"buscador: {msg}", file=sys.stderr)
-            self.show([Result(f"No se pudo abrir {r.title}", msg, "dialog-error", lambda: None)])
+            self.show([Result(tr("open_failed", name=r.title), msg, "dialog-error", lambda: None)])
             return
         # No salir de inmediato: ocultar y esperar a que el lanzamiento termine
         self.closing = True
