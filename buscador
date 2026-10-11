@@ -364,7 +364,7 @@ class Buscador(Gtk.Application):
         self.cancel = Gio.Cancellable()
         proc = Gio.Subprocess.new(
             [FD, "--ignore-case", "--fixed-strings", "--absolute-path", "--max-results", "300",
-             "--exclude", "node_modules", "--exclude", ".git", first, HOME],
+             "--exclude", "node_modules", "--exclude", ".git", "--", first, HOME],
             Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
         proc.communicate_utf8_async(None, self.cancel, self.on_fd, words)
         return False
@@ -471,7 +471,7 @@ class Buscador(Gtk.Application):
             return False
         self.cancel = Gio.Cancellable()
         proc = Gio.Subprocess.new(
-            [GH, "search", "repos", q, "--limit", "10", "--json", "fullName,description,url"],
+            [GH, "search", "repos", "--limit", "10", "--json", "fullName,description,url", "--", q],
             Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE)
         proc.communicate_utf8_async(None, self.cancel, self.on_github_public, q)
         return False
