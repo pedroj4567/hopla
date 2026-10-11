@@ -560,8 +560,10 @@ class Buscador(Gtk.Application):
         r = self.results[index]
         try:
             (r.alt_action if alt and r.alt_action else r.action)()
-        except GLib.Error as e:
-            print(f"buscador: {e.message}", file=sys.stderr)
+        except (GLib.Error, OSError) as e:  # OSError: p. ej. falta "code" o "nautilus"
+            msg = e.message if isinstance(e, GLib.Error) else str(e)
+            print(f"buscador: {msg}", file=sys.stderr)
+            self.show([Result(f"No se pudo abrir {r.title}", msg, "dialog-error", lambda: None)])
             return
         # No salir de inmediato: ocultar y esperar a que el lanzamiento termine
         self.closing = True
