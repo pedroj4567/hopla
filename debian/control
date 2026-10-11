@@ -1,0 +1,28 @@
+Source: hopla
+Section: utils
+Priority: optional
+Maintainer: acostadev08 <pedroj4567@gmail.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Homepage: https://github.com/pedroj4567/hopla
+Vcs-Git: https://github.com/pedroj4567/hopla.git
+Vcs-Browser: https://github.com/pedroj4567/hopla
+Rules-Requires-Root: no
+
+Package: hopla
+Architecture: all
+Depends: ${misc:Depends},
+         python3 (>= 3.9),
+         python3-gi,
+         gir1.2-gtk-4.0 (>= 4.12),
+         gir1.2-glib-2.0
+Recommends: fd-find,
+            gh,
+            nautilus
+Suggests: code
+Description: Spotlight-style launcher for GNOME
+ hopla opens a small floating box (Super+Space) to search and open
+ installed apps, files in your home folder, your GitHub repositories
+ and the web, all from the keyboard.
+ .
+ File search uses fd and the GitHub tab uses the GitHub CLI (gh).

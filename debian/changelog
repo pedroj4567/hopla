@@ -1,0 +1,7 @@
+hopla (1.0.0) resolute; urgency=medium
+
+  * First release: Apps, Files, GitHub and Web tabs.
+  * Installs as /usr/bin/hopla with a desktop entry.
+  * Sets the Super+Space shortcut on first run (hopla --setup-shortcut to redo it).
+
+ -- acostadev08 <pedroj4567@gmail.com>  Sun, 11 Oct 2026 02:38:02 -0500

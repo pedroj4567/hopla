@@ -20,6 +20,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
+VERSION = "1.0.0"
 HOME = os.path.expanduser("~")
 
 # Textos de la interfaz por idioma; se elige según el idioma del sistema (inglés si no está).
@@ -71,7 +72,11 @@ MODES = ["Apps", tr("files"), "GitHub", "Web"]
 MAX_RESULTS = 20
 FD = shutil.which("fdfind") or shutil.which("fd")
 GH = shutil.which("gh")
-ICON_DIR = os.path.join(GLib.get_user_data_dir(), "buscador", "icons")
+# Logos: junto al script (clon del repo) o donde los deja el paquete .deb.
+ICON_DIR = next((d for d in (os.path.join(os.path.dirname(os.path.realpath(__file__)), "icons"),
+                             "/usr/share/hopla/icons",
+                             os.path.join(GLib.get_user_data_dir(), "buscador", "icons"))
+                 if os.path.isdir(d)), "")
 # Icono de cada pestaña: nombre del tema o "brand:<logo>" (svg en ICON_DIR)
 TAB_ICONS = ["view-app-grid-symbolic", "folder-symbolic", "brand:github", "web-browser-symbolic"]
 REPO_CACHE = os.path.join(GLib.get_user_cache_dir(), "buscador", "repos.json")
@@ -169,6 +174,47 @@ def make_icon(name):
     return Gio.ThemedIcon.new(name)
 
 
+MEDIA_KEYS = "org.gnome.settings-daemon.plugins.media-keys"
+SHORTCUT_PATH = f"/{MEDIA_KEYS.replace('.', '/')}/custom-keybindings/hopla/"
+SHORTCUT_DONE = os.path.join(GLib.get_user_config_dir(), "hopla", "shortcut-done")
+
+
+def setup_shortcut(force=False):
+    """Asigna Super+Espacio en GNOME. Sin force solo lo hace la primera vez, para no
+    volver a crear un atajo que el usuario borró a propósito. Devuelve un mensaje o None."""
+    if not force and os.path.exists(SHORTCUT_DONE):
+        return None
+    source = Gio.SettingsSchemaSource.get_default()
+    if not source or not source.lookup(MEDIA_KEYS, True):
+        return "GNOME not detected: bind the 'hopla' command to a key in your desktop settings."
+    os.makedirs(os.path.dirname(SHORTCUT_DONE), exist_ok=True)
+    open(SHORTCUT_DONE, "w").close()
+
+    command = shutil.which("hopla") or os.path.realpath(sys.argv[0])
+    media = Gio.Settings.new(MEDIA_KEYS)
+    paths = list(media.get_strv("custom-keybindings"))
+    for path in paths:  # ¿ya hay un atajo para hopla/buscador o en Super+Espacio?
+        kb = Gio.Settings.new_with_path(f"{MEDIA_KEYS}.custom-keybinding", path)
+        if kb.get_string("binding") == "<Super>space" or \
+                os.path.basename(kb.get_string("command")) in ("hopla", "buscador"):
+            return None
+    kb = Gio.Settings.new_with_path(f"{MEDIA_KEYS}.custom-keybinding", SHORTCUT_PATH)
+    kb.set_string("name", "hopla")
+    kb.set_string("command", command)
+    kb.set_string("binding", "<Super>space")
+    if SHORTCUT_PATH not in paths:
+        media.set_strv("custom-keybindings", paths + [SHORTCUT_PATH])
+
+    # GNOME usa Super+Espacio para cambiar de distribución de teclado; se le quita
+    # solo esa combinación (sigue con Shift+Super+Espacio y la tecla de teclado).
+    wm = Gio.Settings.new("org.gnome.desktop.wm.keybindings")
+    inputs = list(wm.get_strv("switch-input-source"))
+    if "<Super>space" in inputs:
+        wm.set_strv("switch-input-source", [k for k in inputs if k != "<Super>space"])
+    Gio.Settings.sync()
+    return "Shortcut set: press Super+Space to open hopla."
+
+
 class Result:
     def __init__(self, title, subtitle, icon, action, alt_action=None):
         self.title, self.subtitle, self.icon = title, subtitle, icon
@@ -177,7 +223,7 @@ class Result:
 
 class Buscador(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="dev.acostadev.buscador")
+        super().__init__(application_id="dev.acostadev.hopla")
         self.win = None
         self.mode = 0
         self.results = []
@@ -643,4 +689,11 @@ class Buscador(Gtk.Application):
 
 
 if __name__ == "__main__":
-    sys.exit(Buscador().run(sys.argv))
+    if "--version" in sys.argv[1:]:
+        print(f"hopla {VERSION}")
+        sys.exit(0)
+    if "--setup-shortcut" in sys.argv[1:]:
+        print(setup_shortcut(force=True) or "A Super+Space shortcut for hopla already exists.")
+        sys.exit(0)
+    setup_shortcut()
+    sys.exit(Buscador().run(sys.argv[:1]))

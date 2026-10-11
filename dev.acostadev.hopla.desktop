@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=hopla
+GenericName=Launcher
+Comment=Search apps, files, GitHub repos and the web
+Comment[es]=Busca apps, archivos, repos de GitHub y en la web
+Exec=hopla
+Icon=system-search
+Terminal=false
+Categories=Utility;
+Keywords=search;launcher;spotlight;github;
+StartupNotify=false

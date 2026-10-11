@@ -169,3 +169,8 @@ rm -rf ~/.cache/buscador
 ```
 
 Then delete the **Buscador** shortcut in **Settings → Keyboard → Custom Shortcuts**.
+
+## License
+
+[MIT](LICENSE). The brand logos in `icons/` come from [Simple Icons](https://simpleicons.org)
+(CC0) and are trademarks of their respective owners.
