@@ -8,6 +8,7 @@ Volver a lanzarlo mientras está abierto lo cierra (sirve como toggle del atajo)
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -334,13 +335,16 @@ class Buscador(Gtk.Application):
                 ql = ql[len(w):].strip()
         word, _, terms = ql.partition(" ")
         word = word.removeprefix("https://").removeprefix("http://").removeprefix("www.")
-        word = word.split("/")[0].split(".")[0]  # "gmail.com" → "gmail"
-        if len(word) < 2:
-            return []
         res = []
         for site in SITES:
             name, url, tpl, icon = site
-            if not name.lower().startswith(word):
+            if terms:  # "amazon audífonos": nombre completo, si no "go tutorial" perdería "go"
+                if word != name.lower():
+                    continue
+            elif "/" in word or "." in word:  # "gmail.com" sí; "github.com/x" o "gmail.evil.com" no
+                if not re.fullmatch(re.escape(name.lower()) + r"\.com/?", word):
+                    continue
+            elif len(word) < 2 or not name.lower().startswith(word):
                 continue
             if terms:
                 surl = tpl % urllib.parse.quote(terms)
