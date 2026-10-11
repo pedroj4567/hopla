@@ -555,6 +555,8 @@ class Buscador(Gtk.Application):
             self.scroll.get_vadjustment().set_value(0)
 
     def open_result(self, index, alt):
+        if self.closing:  # doble Enter/clic mientras se lanza el primero
+            return
         r = self.results[index]
         try:
             (r.alt_action if alt and r.alt_action else r.action)()
