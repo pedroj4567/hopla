@@ -102,6 +102,14 @@ def _subsequence(q, t):
     return all(c in it for c in q)
 
 
+def valid_repos(data):
+    """Descarta lo que no tenga la forma esperada (caché dañada o error de la API)."""
+    if not isinstance(data, list):
+        return []
+    return [r for r in data if isinstance(r, dict) and isinstance(r.get("name"), str)
+            and isinstance(r.get("url"), str) and isinstance(r.get("desc"), (str, type(None)))]
+
+
 def make_icon(name):
     """'brand:github' → logo svg instalado; si falta, un icono genérico del tema."""
     if name.startswith("brand:"):
@@ -408,7 +416,7 @@ class Buscador(Gtk.Application):
     def load_repos(self):
         try:
             with open(REPO_CACHE) as f:
-                return json.load(f)
+                return valid_repos(json.load(f))
         except (OSError, ValueError):
             return []
 
@@ -425,15 +433,17 @@ class Buscador(Gtk.Application):
     def on_repos(self, proc, task):
         try:
             _, out, _ = proc.communicate_utf8_finish(task)
-            repos = json.loads(out)
+            repos = valid_repos(json.loads(out))
         except (GLib.Error, ValueError):
             return
-        if repos == self.repos:
+        if not repos or repos == self.repos:
             return
         self.repos = repos
         os.makedirs(os.path.dirname(REPO_CACHE), exist_ok=True)
-        with open(REPO_CACHE, "w") as f:
+        tmp = REPO_CACHE + ".tmp"  # escritura atómica: dos buscadores a la vez no la corrompen
+        with open(tmp, "w") as f:
             json.dump(repos, f)
+        os.replace(tmp, REPO_CACHE)
         if self.mode == 2 and not self.entry.get_text().strip():
             self.show(self.search_github(""))
 
