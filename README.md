@@ -5,6 +5,37 @@ files, GitHub repositories or web searches from a single floating box.
 
 ![hopla showing the Apps tab](docs/screenshot.png)
 
+## Why
+
+On a GNOME desktop, the small things a developer does all day are spread across different
+places:
+
+- **Apps** are in the Activities overview, which takes over the whole screen.
+- **Files** mean opening Nautilus and clicking through folders, or remembering paths in a
+  terminal.
+- **GitHub repos** mean opening the browser, going to github.com and searching there. To
+  open a repo you have already cloned, you have to find its folder and open it in your editor.
+- **Web searches** mean opening the browser, opening a tab and picking the site first.
+
+Each one is a context switch. Together they add up to a lot of clicks and lost focus.
+
+hopla puts all four in **one box behind one shortcut**:
+
+- **One shortcut for everything.** Super+Space opens a small floating window over what you
+  are doing, and Esc (or clicking away) brings you straight back.
+- **Keyboard only.** Type, use Tab to change category, press Enter. You don't need the mouse,
+  and the text you typed is kept when you switch tabs.
+- **Your GitHub work, one keystroke away.** Your repos and your organizations' repos are listed
+  and cached locally, so they show up as you type. Enter opens the repo on GitHub;
+  Ctrl+Enter opens your local clone in VS Code. Pull requests, issues and notifications are
+  one click away too.
+- **Fast file search.** It uses `fd` across your home folder, skips `node_modules` and `.git`,
+  and shows recently used files before you type anything.
+- **Site-aware web search.** Type `youtube lofi` to search YouTube directly, or paste a URL
+  to open it.
+- **Light and native.** It is a single Python script on GTK 4: no Electron, no background
+  daemon. It only runs while it is open.
+
 ## Features
 
 The launcher has four tabs. The text you typed is kept when you switch between them.
